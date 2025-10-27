@@ -2,11 +2,20 @@
 
 Create videos with progressive pixel sorting effects from single images, image sequences, or existing videos.
 
+**Supports strict color space handling for video production workflows:**
+- Rec.709 color graded video (.mov files)
+- SLOG3 raw footage (.mp4 files)
+
 ## Installation
 
 ```bash
-pip install pixelsort pillow opencv-python numpy
+pip install pixelsort pillow opencv-python numpy pymediainfo
 ```
+
+**Note:** `pymediainfo` requires MediaInfo library:
+- Linux: `sudo apt-get install libmediainfo-dev`
+- macOS: `brew install media-info`
+- Windows: Included with pymediainfo package
 
 ## Performance
 
@@ -49,8 +58,8 @@ python pixelsorter.py -m video -i input.mp4 -o output.mp4 -s 30
 - `--upper-buffer` - Upper buffer (default: 0)
 - `--start-lower` - Start lower threshold 0-1 (default: 0.5)
 - `--lower-buffer` - Lower buffer (default: 0)
-- `--reuse-frames` - Sort previous frame instead of source (single mode only)
 - `--no-multiprocessing` - Disable parallel processing (enabled by default)
+- `--type-override` - **Advanced:** Allow unsupported color profiles (video mode only, not recommended)
 
 ## Project Structure
 
@@ -72,24 +81,30 @@ The tool generates videos by progressively pixel-sorting images or video frames:
 The sorting uses the `pixelsort` library with lightness-based threshold intervals. Thresholds expand from a center point (default 0.5) over the number of frames, creating a gradual increase in sorting intensity.
 
 ### Single Image Mode
-- Loads one source image
+- Loads one source image (supports .jpg, .jpeg, .png, .bmp)
 - Generates N static frames (unchanged)
 - Generates M progressively sorted frames
-- Optional: Can sort the previous frame for cumulative effect (`--reuse-frames`)
+- Output: Rec.709 color space (.mov)
 
 ### Stitch Mode
 - Loads numbered images from folder (1.jpg, 2.jpg, etc.)
+- Warns about missing sequence numbers
 - Adds initial static frames from first images
-- Applies progressive sorting to each image in sequence
-- Combines into single video
+- Applies progressive sorting to remaining images in sequence
+- Output: Rec.709 color space (.mov)
 
-### Video Mode (NEW)
+### Video Mode
+- **Automatic color profile detection:**
+  - Reads actual color metadata from video (not just file extension)
+  - **Supported:** Rec.709 (SDR) only
+  - **Rejected:** HDR (HLG, PQ/HDR10), SLOG3, DCI-P3, and other profiles
+  - Use `--type-override` to bypass restrictions (not recommended - colors will be wrong)
 - Reads input video frame-by-frame
 - Preserves first N frames unchanged (normal frames)
 - Applies progressively increasing pixel sort to remaining frames
 - Each frame is sorted independently from its original state
 - Output video maintains source FPS and dimensions
-- Memory-efficient: processes one frame at a time
+- Memory-efficient: processes frames in batches
 
 ## Examples
 
@@ -101,11 +116,6 @@ python pixelsorter.py -m single -i photo.jpg -o sorted.mp4
 **With custom settings:**
 ```bash
 python pixelsorter.py -m single -i photo.jpg -o sorted.mp4 -f 120 -s 10 --fps 24
-```
-
-**Cumulative sorting effect:**
-```bash
-python pixelsorter.py -m single -i photo.jpg -o cumulative.mp4 --reuse-frames
 ```
 
 **Stitch image sequence:**
@@ -145,15 +155,56 @@ The video mode processes each frame with progressively increasing sort intensity
 - Each frame is more sorted than the previous
 - Result: video that gradually "glitches" over time
 
+## Color Space Management
+
+This tool is designed for professional video production workflows with **strict color profile validation**:
+
+**Supported Video Color Profiles:**
+- **Rec.709 (SDR)** ✅ - Only officially supported profile
+- **BT.2020 HLG** ❌ - HDR, will cause overexposure and color shifts
+- **BT.2020 PQ (HDR10)** ❌ - HDR, will cause overexposure and color shifts
+- **SLOG3** ❌ - Log profile, requires special handling
+- **DCI-P3, BT.601, etc.** ❌ - Other gamuts not supported
+
+**Why Only Rec.709?**
+The pixel sorting algorithm processes pixel values directly. Processing HDR or log profiles as SDR causes:
+- Overexposure and clipping
+- Loss of shadow and highlight detail
+- Color shifts and incorrect hue
+- Loss of color grading
+
+**Automatic Detection:**
+The tool reads actual color metadata from video files using MediaInfo:
+- Color primaries (e.g., BT.709, BT.2020)
+- Transfer characteristics (e.g., BT.709, HLG, PQ)
+- Prevents processing of incompatible profiles
+
+**--type-override Flag:**
+Advanced users can bypass restrictions with `--type-override`, but this is **not recommended**:
+```bash
+python pixelsorter.py -m video -i hdr_video.mov -o output.mov --type-override
+```
+⚠️ **Warning:** Colors will likely be incorrect. Convert to Rec.709 first for proper results.
+
+**Image Processing:**
+- Supported formats: .jpg, .jpeg, .png, .bmp
+- RGBA images composited onto white background
+- All outputs use consistent RGB color space
+- Single image and stitch modes output in Rec.709 (.mov)
+
+**Color Consistency:**
+- No unnecessary color space conversions
+- Color profile validated before processing
+- All frames validated for dimension consistency
+- Prevents accidental color grading disruption
+
 ## Notes
 
 - Images in stitch mode must be numbered sequentially (1.jpg, 2.jpg, etc.)
-- Supported image formats: .jpg, .jpeg, .png, .bmp
-- Video mode supports common video formats (mp4, avi, mov, etc.)
-- Output is always MP4 format
-- Video mode preserves source FPS automatically
+- Tool warns about missing sequence numbers
+- Video mode only accepts .mov (Rec.709) or .mp4 (SLOG3)
+- Video mode preserves source FPS and color space automatically
 - Processing time depends on content size and frame count
 - Video mode is memory-efficient (processes frames in batches)
 - Multiprocessing is enabled by default for 3-12x speedup
 - Multiprocessing can be disabled with `--no-multiprocessing` flag
-- Reuse frames mode (single image) runs sequentially due to data dependency

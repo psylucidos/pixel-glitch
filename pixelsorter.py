@@ -7,15 +7,14 @@ Supports single image mode, image stitching mode, and video mode.
 import argparse
 import sys
 import time
+import os
 import cv2
 from utils import load_image, load_images_from_folder, count_files, prompt_input
 from video import images_to_mp4, get_video_info, bgr_to_pil, pil_to_bgr
 from sorter import calculate_increments, generate_sorted_frames, generate_stitched_frames, process_video_with_sorting
-
-
 def process_single_image(image_path, output_path, num_frames, num_normal_frames,
                          start_upper, upper_buffer, start_lower, lower_buffer,
-                         reuse_frames, fps, use_multiprocessing=True):
+                         fps, use_multiprocessing=True):
   """
   Process single image into progressively pixel-sorted video.
   
@@ -27,7 +26,6 @@ def process_single_image(image_path, output_path, num_frames, num_normal_frames,
   @param {float} upper_buffer - Upper threshold buffer
   @param {float} start_lower - Starting lower threshold
   @param {float} lower_buffer - Lower threshold buffer
-  @param {bool} reuse_frames - Sort previous frame instead of source
   @param {int} fps - Frames per second
   @param {bool} use_multiprocessing - Enable parallel processing (default: True)
   @return {bool} True if successful, False otherwise
@@ -52,19 +50,17 @@ def process_single_image(image_path, output_path, num_frames, num_normal_frames,
   # Add sorted frames
   print(f"Generating {num_frames} sorted frames...")
   sorted_frames = generate_sorted_frames(
-    img, num_frames, increment_up, increment_lower, reuse_frames, use_multiprocessing=use_multiprocessing
+    img, num_frames, increment_up, increment_lower, use_multiprocessing=use_multiprocessing
   )
   frames.extend(sorted_frames)
   
-  # Create video
-  success = images_to_mp4(frames, output_path, fps=fps)
+  # Create video - single images output in Rec.709
+  success = images_to_mp4(frames, output_path, fps=fps, color_space='rec709')
   
   elapsed = time.time() - start_time
   print(f"Completed in {elapsed:.1f}s ({len(frames)} frames)")
   
   return success
-
-
 def process_image_folder(folder_path, output_path, num_normal_frames,
                          start_upper, upper_buffer, start_lower, lower_buffer, fps, use_multiprocessing=True):
   """
@@ -84,12 +80,7 @@ def process_image_folder(folder_path, output_path, num_normal_frames,
   print(f"\nProcessing folder: {folder_path}")
   start_time = time.time()
   
-  file_count = count_files(folder_path)
-  if file_count <= 0:
-    print("Error: No images found")
-    return False
-  
-  print(f"Loading {file_count} images...")
+  print(f"Loading images...")
   images = load_images_from_folder(folder_path)
   if not images:
     print("Error: Failed to load images")
@@ -104,7 +95,8 @@ def process_image_folder(folder_path, output_path, num_normal_frames,
     images, num_normal_frames, increment_up, increment_lower, use_multiprocessing=use_multiprocessing
   )
   
-  success = images_to_mp4(frames, output_path, fps=fps)
+  # Image sequences output in Rec.709
+  success = images_to_mp4(frames, output_path, fps=fps, color_space='rec709')
   
   elapsed = time.time() - start_time
   print(f"Completed in {elapsed:.1f}s ({len(frames)} frames)")
@@ -112,9 +104,12 @@ def process_image_folder(folder_path, output_path, num_normal_frames,
   return success
 
 def process_video(input_path, output_path, num_normal_frames,
-                  start_upper, upper_buffer, start_lower, lower_buffer, use_multiprocessing=True):
+                  start_upper, upper_buffer, start_lower, lower_buffer, 
+                  use_multiprocessing=True, allow_type_override=False):
   """
   Process video with progressive pixel sorting on each frame.
+  Only Rec.709 (SDR) is officially supported. Other color profiles can be
+  processed with --type-override flag but may produce incorrect colors.
   
   @param {str} input_path - Path to input video
   @param {str} output_path - Path to output video
@@ -124,13 +119,14 @@ def process_video(input_path, output_path, num_normal_frames,
   @param {float} start_lower - Starting lower threshold
   @param {float} lower_buffer - Lower threshold buffer
   @param {bool} use_multiprocessing - Enable parallel processing (default: True)
+  @param {bool} allow_type_override - Allow processing of unsupported color profiles (default: False)
   @return {bool} True if successful, False otherwise
   """
   print(f"\nProcessing video: {input_path}")
   start_time = time.time()
   
-  # Get video info
-  info = get_video_info(input_path)
+  # Validate and get video info with color space detection
+  info = get_video_info(input_path, allow_override=allow_type_override)
   if info is None:
     return False
   
@@ -138,8 +134,10 @@ def process_video(input_path, output_path, num_normal_frames,
   fps = info['fps']
   width = info['width']
   height = info['height']
+  color_space = info['color_space']
   
   print(f"Video info: {total_frames} frames, {fps:.2f} fps, {width}x{height}")
+  print(f"Color space: {color_space.upper()}")
   
   # Calculate sorting parameters
   frames_to_sort = total_frames - num_normal_frames
@@ -151,13 +149,36 @@ def process_video(input_path, output_path, num_normal_frames,
     start_upper, upper_buffer, start_lower, lower_buffer, frames_to_sort
   )
   
-  # Open video capture and writer
+  # Create output directory if needed
+  output_dir = os.path.dirname(output_path)
+  if output_dir:
+    os.makedirs(output_dir, exist_ok=True)
+  
+  # Adjust output path based on color space
+  from video import get_output_path_for_color_space, get_video_codec_for_color_space
+  output_path = get_output_path_for_color_space(output_path, color_space)
+  
+  # Open video capture and writer with appropriate codec
   cap = cv2.VideoCapture(input_path)
-  fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+  codec_code = get_video_codec_for_color_space(color_space)
+  fourcc = cv2.VideoWriter_fourcc(*codec_code)
   out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+  
+  # Fallback to mp4v if primary codec fails
+  if not out.isOpened():
+    print(f"Warning: Codec '{codec_code}' not available, falling back to 'mp4v'")
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    if not output_path.endswith('.mp4'):
+      output_path = os.path.splitext(output_path)[0] + '.mp4'
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
   
   if not cap.isOpened():
     print("Error: Could not open video")
+    return False
+  
+  if not out.isOpened():
+    print("Error: Could not create video writer")
+    cap.release()
     return False
   
   # Process frames
@@ -178,8 +199,6 @@ def process_video(input_path, output_path, num_normal_frames,
     print(f"Saved: {output_path}")
   
   return success
-
-
 def interactive_mode():
   """
   Run in interactive mode with prompts.
@@ -199,7 +218,6 @@ def interactive_mode():
     output_path = prompt_input("Output video", "output.mp4", str)
     num_frames = prompt_input("Sorted frames", 90, int)
     num_normal_frames = prompt_input("Static frames", 5, int)
-    reuse_frames = prompt_input("Reuse frames (true/false)", "false", str).lower() == "true"
     start_upper = prompt_input("Start upper (0-1)", 0.5, float)
     upper_buffer = prompt_input("Upper buffer", 0, float)
     start_lower = prompt_input("Start lower (0-1)", 0.5, float)
@@ -209,7 +227,7 @@ def interactive_mode():
     return process_single_image(
       image_path, output_path, num_frames, num_normal_frames,
       start_upper, upper_buffer, start_lower, lower_buffer,
-      reuse_frames, fps, use_multiprocessing=True
+      fps, use_multiprocessing=True
     )
   
   elif mode == "2":
@@ -235,17 +253,17 @@ def interactive_mode():
     upper_buffer = prompt_input("Upper buffer", 0, float)
     start_lower = prompt_input("Start lower (0-1)", 0.5, float)
     lower_buffer = prompt_input("Lower buffer", 0, float)
+    override = prompt_input("Allow unsupported color profiles (true/false)", "false", str).lower() == "true"
     
     return process_video(
       input_path, output_path, num_normal_frames,
-      start_upper, upper_buffer, start_lower, lower_buffer, use_multiprocessing=True
+      start_upper, upper_buffer, start_lower, lower_buffer, 
+      use_multiprocessing=True, allow_type_override=override
     )
   
   else:
     print("Invalid mode")
     return False
-
-
 def main():
   """
   Main entry point.
@@ -267,8 +285,8 @@ def main():
   parser.add_argument('--upper-buffer', type=float, default=0, help='Upper buffer (default: 0)')
   parser.add_argument('--start-lower', type=float, default=0.5, help='Start lower threshold (default: 0.5)')
   parser.add_argument('--lower-buffer', type=float, default=0, help='Lower buffer (default: 0)')
-  parser.add_argument('--reuse-frames', action='store_true', help='Sort previous frame (single mode)')
   parser.add_argument('--no-multiprocessing', action='store_true', help='Disable parallel processing')
+  parser.add_argument('--type-override', action='store_true', help='Allow processing of unsupported video color profiles (video mode only, not recommended)')
   
   args = parser.parse_args()
   
@@ -288,7 +306,7 @@ def main():
       args.input, args.output, num_frames, num_static,
       args.start_upper, args.upper_buffer, 
       args.start_lower, args.lower_buffer,
-      args.reuse_frames, args.fps, use_multiprocessing=not args.no_multiprocessing
+      args.fps, use_multiprocessing=not args.no_multiprocessing
     )
     
   elif args.mode == 'stitch':
@@ -314,7 +332,9 @@ def main():
     success = process_video(
       args.input, args.output, num_static,
       args.start_upper, args.upper_buffer,
-      args.start_lower, args.lower_buffer, use_multiprocessing=not args.no_multiprocessing
+      args.start_lower, args.lower_buffer, 
+      use_multiprocessing=not args.no_multiprocessing,
+      allow_type_override=args.type_override
     )
   
   return 0 if success else 1

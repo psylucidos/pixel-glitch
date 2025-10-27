@@ -2,8 +2,6 @@
 
 from pixelsort import pixelsort
 from multiprocessing import Pool, cpu_count
-
-
 def calculate_increments(start_upper, upper_buffer, start_lower, lower_buffer, num_frames):
   """
   Calculate threshold increments for progressive sorting.
@@ -29,16 +27,21 @@ def apply_sort(image, frame_index, increment_up, increment_lower):
   @param {float} increment_lower - Lower threshold increment
   @return {Image.Image} Sorted PIL Image
   """
-  lower_threshold = 0.5 - (frame_index * increment_up)
-  upper_threshold = 0.5 + (frame_index * increment_lower)
-  
-  return pixelsort(
-    image=image,
-    sorting_function="lightness",
-    interval_function="threshold",
-    lower_threshold=lower_threshold,
-    upper_threshold=upper_threshold
-  )
+  try:
+    lower_threshold = 0.5 - (frame_index * increment_up)
+    upper_threshold = 0.5 + (frame_index * increment_lower)
+    
+    return pixelsort(
+      image=image,
+      sorting_function="lightness",
+      interval_function="threshold",
+      lower_threshold=lower_threshold,
+      upper_threshold=upper_threshold
+    )
+  except Exception as e:
+    print(f"Warning: Frame {frame_index} sorting failed: {e}")
+    print(f"Returning original frame")
+    return image.copy()
 
 def _sort_frame_worker(args):
   """
@@ -52,7 +55,7 @@ def _sort_frame_worker(args):
   sorted_frame = apply_sort(source_image, frame_index, increment_up, increment_lower)
   return (frame_index, sorted_frame)
 
-def generate_sorted_frames(source_image, num_frames, increment_up, increment_lower, reuse_frames=False, use_multiprocessing=True):
+def generate_sorted_frames(source_image, num_frames, increment_up, increment_lower, use_multiprocessing=True):
   """
   Generate progressively sorted frames from single image.
   Note: Multi-threaded when use_multiprocessing=True
@@ -61,19 +64,17 @@ def generate_sorted_frames(source_image, num_frames, increment_up, increment_low
   @param {int} num_frames - Number of frames to generate
   @param {float} increment_up - Upper threshold increment
   @param {float} increment_lower - Lower threshold increment
-  @param {bool} reuse_frames - If True, sort previous frame instead of source
   @param {bool} use_multiprocessing - If True, use parallel processing (default: True)
   @return {list} List of sorted PIL Images
   """
-  # Reuse frames mode cannot be parallelized (sequential dependency)
-  if reuse_frames or not use_multiprocessing or num_frames < 4:
+  # Sequential processing for small batches
+  if not use_multiprocessing or num_frames < 4:
     frames = []
     for i in range(num_frames):
-      base_image = frames[-1] if (i > 0 and reuse_frames) else source_image
-      sorted_frame = apply_sort(base_image, i, increment_up, increment_lower)
+      sorted_frame = apply_sort(source_image, i, increment_up, increment_lower)
       frames.append(sorted_frame)
       
-      if (i + 1) % 10 == 0 or i == num_frames - 1:
+      if ((i + 1) % 10 == 0 and i != num_frames - 1) or i == num_frames - 1:
         print(f"Progress: {i + 1}/{num_frames}")
     
     return frames
@@ -92,7 +93,7 @@ def generate_sorted_frames(source_image, num_frames, increment_up, increment_low
     results = []
     for i, result in enumerate(pool.imap(_sort_frame_worker, frame_args)):
       results.append(result)
-      if (i + 1) % 10 == 0 or i == num_frames - 1:
+      if ((i + 1) % 10 == 0 and i != num_frames - 1) or i == num_frames - 1:
         print(f"Progress: {i + 1}/{num_frames}")
   
   # Sort results by frame index and extract frames
@@ -128,28 +129,35 @@ def generate_stitched_frames(images, num_normal_frames, increment_up, increment_
   frames = []
   
   # Add initial static frames
-  for i in range(min(num_normal_frames, len(images))):
+  num_static = min(num_normal_frames, len(images))
+  for i in range(num_static):
     frames.append(images[i])
   
+  # Get remaining images to sort
+  images_to_sort = images[num_static:] if num_static < len(images) else []
+  
+  if not images_to_sort:
+    return frames
+  
   # Check if parallel processing is beneficial
-  if not use_multiprocessing or len(images) < 4:
+  if not use_multiprocessing or len(images_to_sort) < 4:
     # Sequential processing
-    for i, image in enumerate(images):
+    for i, image in enumerate(images_to_sort):
       sorted_frame = apply_sort(image, i, increment_up, increment_lower)
       frames.append(sorted_frame)
       
-      if (i + 1) % 10 == 0 or i == len(images) - 1:
-        print(f"Progress: {i + 1}/{len(images)}")
+      if ((i + 1) % 10 == 0 and i != len(images_to_sort) - 1) or i == len(images_to_sort) - 1:
+        print(f"Progress: {i + 1}/{len(images_to_sort)} sorted")
     
     return frames
   
   # Parallel processing
   print(f"Using {cpu_count()} CPU cores for parallel processing")
   
-  # Prepare arguments for all images
+  # Prepare arguments for images to sort
   image_args = [
     (image, i, increment_up, increment_lower)
-    for i, image in enumerate(images)
+    for i, image in enumerate(images_to_sort)
   ]
   
   # Process images in parallel
@@ -157,8 +165,8 @@ def generate_stitched_frames(images, num_normal_frames, increment_up, increment_
     results = []
     for i, result in enumerate(pool.imap(_sort_image_worker, image_args)):
       results.append(result)
-      if (i + 1) % 10 == 0 or i == len(images) - 1:
-        print(f"Progress: {i + 1}/{len(images)}")
+      if ((i + 1) % 10 == 0 and i != len(images_to_sort) - 1) or i == len(images_to_sort) - 1:
+        print(f"Progress: {i + 1}/{len(images_to_sort)} sorted")
   
   # Sort results by image index and extract sorted frames
   results.sort(key=lambda x: x[0])
@@ -231,7 +239,7 @@ def process_video_with_sorting(video_cap, video_writer, total_frames, num_normal
         bgr_frame = pil_to_bgr_func(pil_image)
         video_writer.write(bgr_frame)
         
-        if (i + 1) % 10 == 0 or i == total_frames - 1:
+        if ((i + 1) % 10 == 0 and i != total_frames - 1) or i == total_frames - 1:
           print(f"Progress: {i + 1}/{total_frames}")
       
       return True
@@ -247,35 +255,36 @@ def process_video_with_sorting(video_cap, video_writer, total_frames, num_normal
     
     print(f"Using {cpu_count()} CPU cores for parallel processing (batch size: {batch_size})")
     
-    frame_buffer = []
-    frames_processed = 0
-    
-    # Read and process frames in batches
-    for i in range(total_frames):
-      ret, frame = video_cap.read()
+    # Create pool once for efficiency
+    with Pool(cpu_count()) as pool:
+      frame_buffer = []
+      frames_processed = 0
       
-      if not ret:
-        print(f"Warning: Could not read frame {i}")
-        break
-      
-      # Add frame to buffer
-      frame_buffer.append((frame, i, num_normal_frames, increment_up, increment_lower, bgr_to_pil_func, pil_to_bgr_func))
-      
-      # Process batch when full or at end
-      if len(frame_buffer) >= batch_size or i == total_frames - 1:
-        with Pool(cpu_count()) as pool:
+      # Read and process frames in batches
+      for i in range(total_frames):
+        ret, frame = video_cap.read()
+        
+        if not ret:
+          print(f"Warning: Could not read frame {i}")
+          break
+        
+        # Add frame to buffer
+        frame_buffer.append((frame, i, num_normal_frames, increment_up, increment_lower, bgr_to_pil_func, pil_to_bgr_func))
+        
+        # Process batch when full or at end
+        if len(frame_buffer) >= batch_size or i == total_frames - 1:
           results = pool.map(_sort_video_frame_worker, frame_buffer)
-        
-        # Sort results by frame index and write in order
-        results.sort(key=lambda x: x[0])
-        for _, bgr_frame in results:
-          video_writer.write(bgr_frame)
-          frames_processed += 1
           
-          if frames_processed % 10 == 0 or frames_processed == total_frames:
-            print(f"Progress: {frames_processed}/{total_frames}")
-        
-        frame_buffer = []
+          # Sort results by frame index and write in order
+          results.sort(key=lambda x: x[0])
+          for _, bgr_frame in results:
+            video_writer.write(bgr_frame)
+            frames_processed += 1
+            
+            if ((frames_processed % 10 == 0 and frames_processed != total_frames) or frames_processed == total_frames):
+              print(f"Progress: {frames_processed}/{total_frames}")
+          
+          frame_buffer = []
     
     return True
     
